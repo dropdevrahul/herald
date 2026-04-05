@@ -2,9 +2,9 @@ package gemini
 
 import (
 	"context"
-	"dropdevrahul/herald/src/model"
 	"encoding/json"
 	"fmt"
+	"github.com/dropdevrahul/herald/src/model"
 	"io"
 	"net/http"
 	"strings"

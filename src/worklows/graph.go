@@ -2,7 +2,7 @@ package workflows
 
 import (
 	"context"
-	"dropdevrahul/herald/src/model"
+	"github.com/dropdevrahul/herald/src/model"
 	"strings"
 )
 

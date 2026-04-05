@@ -2,8 +2,8 @@ package workflows
 
 import (
 	"context"
-	"dropdevrahul/herald/src/model"
 	"errors"
+	"github.com/dropdevrahul/herald/src/model"
 	"strings"
 	"sync"
 )

@@ -2,7 +2,7 @@ package openai
 
 import (
 	"context"
-	"dropdevrahul/herald/src/model"
+	"github.com/dropdevrahul/herald/src/model"
 	"strings"
 
 	"github.com/openai/openai-go/v3"
