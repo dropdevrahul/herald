@@ -2,163 +2,362 @@ package workflows
 
 import (
 	"context"
+	"dropdevrahul/herald/src/model"
 	"strings"
 )
 
-// Edge represents a directed connection between nodes
+type State[T any] interface {
+	Get() T
+	Set(T)
+}
+
+type MessagesState struct {
+	messages []model.Message
+}
+
+func NewMessagesState(messages []model.Message) MessagesState {
+	return MessagesState{messages: messages}
+}
+
+func (s MessagesState) Get() []model.Message {
+	return s.messages
+}
+
+func (s *MessagesState) Set(messages []model.Message) {
+	s.messages = messages
+}
+
+func (s MessagesState) AddMessage(msg model.Message) MessagesState {
+	s.messages = append(s.messages, msg)
+	return s
+}
+
+type GraphNodeFunc func(ctx context.Context, state any) (any, error)
+
+type GraphNode struct {
+	Name        string
+	Description string
+	Run         GraphNodeFunc
+}
+
+type ConditionalGraphFunc func(ctx context.Context, state any) string
+
+type ConditionalGraphNode struct {
+	Name  string
+	Func  ConditionalGraphFunc
+	Graph *Graph
+}
+
+type ConditionalFunc func(ctx context.Context, state any) string
+
+type ConditionalNode struct {
+	Name  string
+	Func  ConditionalFunc
+	Graph *Graph
+}
+
 type Edge struct {
-	From string // source node ID
-	To   string // destination node ID
+	From string
+	To   string
 }
 
-// NodeWithEdges represents a node with its associated edges
-type NodeWithEdges struct {
-	ID        string
-	Prompt    string
-	Edges     []string // IDs of nodes connected from this node
-	LoopBack  bool     // whether this node can loop back to itself
-}
-
-// Graph represents a directed graph of workflow nodes
 type Graph struct {
-	ID       string
-	Model    model.Model
-	nodes    map[string]*NodeWithEdges
-	edges    map[string][]Edge
+	ID          string
+	Model       model.Model
+	Nodes       map[string]*GraphNode
+	Edges       []Edge
+	Conditional map[string]*ConditionalGraphNode
+	Start       string
 }
 
-// NewGraph creates a new graph-based workflow
-func NewGraph(m model.Model, initialNodes ...*NodeWithEdges) *Graph {
-	g := &Graph{
-		ID:      "default",
-		Model:   m,
-		nodes:   make(map[string]*NodeWithEdges),
-		edges:   make(map[string][]Edge),
+func NewGraph(model model.Model) *Graph {
+	return &Graph{
+		ID:          "default",
+		Model:       model,
+		Nodes:       make(map[string]*GraphNode),
+		Edges:       []Edge{},
+		Conditional: make(map[string]*ConditionalGraphNode),
 	}
+}
 
-	for _, node := range initialNodes {
-		if g.nodes[node.ID] != nil {
-			g.nodes[node.ID].Prompt = g.nodes[node.ID].Prompt + "\n" + node.Prompt
-			g.nodes[node.ID].Edges = append(g.nodes[node.ID].Edges, node.Edges...)
-		} else {
-			g.nodes[node.ID] = node
-		}
+func (g *Graph) AddNode(name string, description string, run GraphNodeFunc) *Graph {
+	g.Nodes[name] = &GraphNode{
+		Name:        name,
+		Description: description,
+		Run:         run,
 	}
-
-	for nodeID, node := range g.nodes {
-		g.edges[nodeID] = make([]Edge, 0, len(node.Edges))
-		for _, edgeID := range node.Edges {
-			g.edges[nodeID] = append(g.edges[nodeID], Edge{From: nodeID, To: edgeID})
-		}
-	}
-
 	return g
 }
 
-// Run executes the graph workflow from a starting node
-func (g *Graph) Run(ctx context.Context, userInput string, startNode string) (string, error) {
-	state := &State{
-		Nodes:   make(map[string]string),
-		Current: startNode,
-	}
-
-	output, err := g.executeStep(ctx, state.Current, userInput, state)
-	if err != nil {
-		return "", err
-	}
-
-	state.Nodes[state.Current] = output
-
-	for {
-		if state.Current == "" {
-			break
-		}
-
-		input := state.Nodes[state.Current]
-		output, err = g.executeStep(ctx, state.Current, input, state)
-		if err != nil {
-			return "", err
-		}
-
-		state.Nodes[state.Current] = output
-
-		// Find next node from edges
-		nextNode := g.findNextNode(state.Current)
-		if nextNode == "" {
-			break
-		}
-
-		state.Current = nextNode
-		state.Execution[state.Current]++
-
-		if state.Execution[state.Current] >= 10 {
-			break // safety limit
-		}
-
-		output, err = g.executeStep(ctx, state.Current, output, state)
-		if err != nil {
-			return "", err
-		}
-
-		state.Nodes[state.Current] = output
-	}
-
-	return output, nil
+func (g *Graph) AddEdge(from string, to string) *Graph {
+	g.Edges = append(g.Edges, Edge{From: from, To: to})
+	return g
 }
 
-// findNextNode chooses the next node based on edges and current state
-func (g *Graph) findNextNode(current string) string {
-	edgeList := g.edges[current]
-	if edgeList == nil || len(edgeList) == 0 {
-		return ""
+func (g *Graph) SetStart(node string) *Graph {
+	g.Start = node
+	return g
+}
+
+func (g *Graph) AddConditionalNode(name string, conditionFunc ConditionalGraphFunc) *Graph {
+	g.Conditional[name] = &ConditionalGraphNode{
+		Name:  name,
+		Func:  conditionFunc,
+		Graph: g,
+	}
+	return g
+}
+
+func (g *Graph) Compile() (*CompiledGraph, error) {
+	if g.Start == "" {
+		return nil, ErrNoStartNode
+	}
+	if _, ok := g.Nodes[g.Start]; !ok {
+		return nil, ErrNodeNotFound
+	}
+	return &CompiledGraph{Graph: g}, nil
+}
+
+func (g *Graph) GetNode(name string) (*GraphNode, bool) {
+	node, ok := g.Nodes[name]
+	return node, ok
+}
+
+func (g *Graph) GetEdgesFrom(node string) []string {
+	var edges []string
+	for _, e := range g.Edges {
+		if e.From == node {
+			edges = append(edges, e.To)
+		}
+	}
+	return edges
+}
+
+type CompiledGraph struct {
+	*Graph
+	MaxIterations int
+}
+
+func (cg *CompiledGraph) Run(ctx context.Context, input any) (any, error) {
+	current := cg.Start
+	iteration := 0
+	maxIter := cg.MaxIterations
+	if maxIter == 0 {
+		maxIter = 10
 	}
 
-	for _, edge := range edgeList {
-		// Skip self-loop unless LoopBack is true
-		if edge.To == current {
-			if g.nodes[current].LoopBack {
-				continue
+	for current != "" && iteration < maxIter {
+		node, ok := cg.Nodes[current]
+		if !ok {
+			break
+		}
+
+		result, err := node.Run(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+
+		input = result
+		iteration++
+
+		current = cg.getNextNode(ctx, current, result)
+	}
+
+	return input, nil
+}
+
+func (cg *CompiledGraph) RunStream(ctx context.Context, input any, handler func(string, any) error) (any, error) {
+	current := cg.Start
+	iteration := 0
+	maxIter := cg.MaxIterations
+	if maxIter == 0 {
+		maxIter = 10
+	}
+
+	for current != "" && iteration < maxIter {
+		node, ok := cg.Nodes[current]
+		if !ok {
+			break
+		}
+
+		result, err := node.Run(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+
+		if handler != nil {
+			if err := handler(current, result); err != nil {
+				return nil, err
 			}
 		}
 
-		// Skip nodes already visited more than once
-		if g.Execution[edge.To] > 0 {
-			continue
-		}
+		input = result
+		iteration++
 
-		return edge.To
+		current = cg.getNextNode(ctx, current, result)
 	}
 
-	return ""
+	return input, nil
 }
 
-// executeStep runs the model with the current node
-func (g *Graph) executeStep(ctx context.Context, nodeID string, input string, state *State) (string, error) {
-	node := g.nodes[nodeID]
-	if node == nil {
-		return "", nil
+func (cg *CompiledGraph) getNextNode(ctx context.Context, current string, result any) string {
+	currentEdges := cg.GetEdgesFrom(current)
+	if len(currentEdges) == 0 {
+		return ""
 	}
 
-	contentChan, errChan := g.Model.Stream(ctx, []model.Message{
-		{Role: model.RoleSystem, Content: node.Prompt},
+	for _, nextNode := range currentEdges {
+		if conditional, ok := cg.Conditional[nextNode]; ok {
+			nextStep := conditional.Func(ctx, result)
+			if nextStep != "" {
+				return nextStep
+			}
+		}
+	}
+
+	return currentEdges[0]
+}
+
+type LLMNode struct {
+	GraphNode
+	Prompt string
+	Model  model.Model
+}
+
+func NewLLMNode(name string, prompt string, m model.Model) *LLMNode {
+	return &LLMNode{
+		GraphNode: GraphNode{
+			Name:        name,
+			Description: prompt,
+			Run: func(ctx context.Context, state any) (any, error) {
+				return runLLM(ctx, m, prompt, state)
+			},
+		},
+		Prompt: prompt,
+		Model:  m,
+	}
+}
+
+func runLLM(ctx context.Context, m model.Model, prompt string, state any) (any, error) {
+	var input string
+	switch s := state.(type) {
+	case string:
+		input = s
+	case map[string]any:
+		if v, ok := s["input"]; ok {
+			input, _ = v.(string)
+		}
+	}
+
+	messages := []model.Message{
+		{Role: model.RoleSystem, Content: prompt},
 		{Role: model.RoleUser, Content: input},
-	}, nil)
+	}
+
+	resultChan := m.Stream(ctx, messages, nil)
 
 	var sb strings.Builder
-	for content := range contentChan {
-		sb.WriteString(content)
-	}
-
-	if err := <-errChan; err != nil {
-		return "", err
+	for result := range resultChan {
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		if result.Delta != "" {
+			sb.WriteString(result.Delta)
+		}
+		if result.Content != "" && result.Delta == "" {
+			sb.WriteString(result.Content)
+		}
 	}
 
 	return sb.String(), nil
 }
 
-// State holds the state of graph execution
-type State struct {
-	Nodes   map[string]string
-	Current string
-	Execution map[string]int
+type ToolNode struct {
+	GraphNode
+	Tool Tool
+}
+
+func NewToolNode(name string, tool Tool) *ToolNode {
+	return &ToolNode{
+		GraphNode: GraphNode{
+			Name:        name,
+			Description: tool.Description(),
+			Run: func(ctx context.Context, state any) (any, error) {
+				var input string
+				switch s := state.(type) {
+				case string:
+					input = s
+				case map[string]any:
+					if v, ok := s["input"]; ok {
+						input, _ = v.(string)
+					}
+				}
+				return tool.Call(ctx, input)
+			},
+		},
+		Tool: tool,
+	}
+}
+
+type ConditionalLLMNode struct {
+	ConditionalGraphNode
+	Model  model.Model
+	System string
+}
+
+func NewConditionalLLMNode(name string, systemPrompt string, m model.Model) *ConditionalLLMNode {
+	return &ConditionalLLMNode{
+		ConditionalGraphNode: ConditionalGraphNode{
+			Name: name,
+			Func: func(ctx context.Context, state any) string {
+				var input string
+				switch s := state.(type) {
+				case string:
+					input = s
+				case map[string]any:
+					if v, ok := s["input"]; ok {
+						input, _ = v.(string)
+					}
+				}
+
+				prompt := systemPrompt + "\n\nInput: " + input + "\n\nDetermine the next step:"
+
+				messages := []model.Message{
+					{Role: model.RoleUser, Content: prompt},
+				}
+
+				resultChan := m.Stream(ctx, messages, nil)
+				var sb strings.Builder
+				for result := range resultChan {
+					if result.Err != nil {
+						return ""
+					}
+					if result.Delta != "" {
+						sb.WriteString(result.Delta)
+					}
+					if result.Content != "" && result.Delta == "" {
+						sb.WriteString(result.Content)
+					}
+				}
+
+				return strings.TrimSpace(sb.String())
+			},
+		},
+		Model:  m,
+		System: systemPrompt,
+	}
+}
+
+var (
+	ErrNoStartNode  = ErrNodeNotFound
+	ErrNodeNotFound = NotFoundError{"node not found"}
+	ErrNoEdges      = NotFoundError{"no outgoing edges"}
+)
+
+type NotFoundError struct {
+	msg string
+}
+
+func (e NotFoundError) Error() string {
+	return e.msg
 }

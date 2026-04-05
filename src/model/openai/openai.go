@@ -3,20 +3,16 @@ package openai
 import (
 	"context"
 	"dropdevrahul/herald/src/model"
-	"os"
+	"strings"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 )
 
-func newOpenAIClient() *openai.Client {
-	key, found := os.LookupEnv("API_KEY")
-	if !found {
-		panic("API KEY not found")
-	}
+func newOpenAIClient(apiKey string, baseURL string) *openai.Client {
 	client := openai.NewClient(
-		option.WithBaseURL("https://api.groq.com/openai/v1"),
-		option.WithAPIKey(key),
+		option.WithBaseURL(baseURL),
+		option.WithAPIKey(apiKey),
 	)
 	return &client
 }
@@ -51,13 +47,16 @@ func (m *OpenAIModel) Generate(ctx context.Context, messages []model.Message, op
 	}, nil
 }
 
-func (m *OpenAIModel) Stream(ctx context.Context, messages []model.Message, opts *model.ModelOptions) (<-chan string, <-chan error) {
+func (m *OpenAIModel) Stream(ctx context.Context, messages []model.Message, opts *model.ModelOptions) <-chan model.StreamResult {
 	if opts == nil {
 		opts = &m.options
 	}
 
-	contentChan := make(chan string)
-	errChan := make(chan error, 1)
+	if opts.Model == "" {
+		opts.Model = m.options.Model
+	}
+
+	resultChan := make(chan model.StreamResult)
 
 	params := openai.ChatCompletionNewParams{
 		Model:    opts.Model,
@@ -67,22 +66,35 @@ func (m *OpenAIModel) Stream(ctx context.Context, messages []model.Message, opts
 	stream := m.client.Chat.Completions.NewStreaming(ctx, params)
 
 	go func() {
-		defer close(contentChan)
-		defer close(errChan)
+		defer close(resultChan)
 
+		var sb strings.Builder
 		for stream.Next() {
 			chunk := stream.Current()
 			for _, choice := range chunk.Choices {
-				contentChan <- choice.Delta.Content
+				delta := choice.Delta.Content
+				if delta != "" {
+					sb.WriteString(delta)
+					resultChan <- model.StreamResult{
+						Delta: delta,
+					}
+				}
 			}
 		}
 
 		if err := stream.Err(); err != nil {
-			errChan <- err
+			resultChan <- model.StreamResult{
+				Err: err,
+			}
+			return
+		}
+
+		resultChan <- model.StreamResult{
+			Content: sb.String(),
 		}
 	}()
 
-	return contentChan, errChan
+	return resultChan
 }
 
 func toOpenAIMessages(messages []model.Message) []openai.ChatCompletionMessageParamUnion {
@@ -95,11 +107,17 @@ func toOpenAIMessages(messages []model.Message) []openai.ChatCompletionMessagePa
 			openAIMessages = append(openAIMessages, openai.UserMessage(m.Content))
 		case model.RoleAssistant:
 			openAIMessages = append(openAIMessages, openai.AssistantMessage(m.Content))
+		case model.RoleTool:
+			openAIMessages = append(openAIMessages, openai.ToolMessage(m.Content, m.ToolCallID))
 		}
 	}
 	return openAIMessages
 }
 
-func NewOpenAIModel(options model.ModelOptions) model.Model {
-	return &OpenAIModel{options: options, client: newOpenAIClient()}
+func NewOpenAIModel(options model.ModelOptions, client *openai.Client) model.Model {
+	return &OpenAIModel{options: options, client: client}
+}
+
+func NewClient(apiKey string, baseURL string) *openai.Client {
+	return newOpenAIClient(apiKey, baseURL)
 }
