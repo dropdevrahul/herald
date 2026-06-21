@@ -7,7 +7,7 @@
 ## Status
 
 - **Active Development**
-- **Go 1.22+** required
+- **Go 1.24+** required
 
 ## Core Architecture
 
@@ -31,7 +31,7 @@ type Model interface {
 
 **Implementations:**
 - `src/model/openai/openai.go` - OpenAI-compatible (Groq, Azure, custom endpoints)
-- `src/model/anthropic/anthropic.go` - Anthropic API (placeholder)
+- `src/model/anthropic/anthropic.go` - Anthropic API (net/http)
 - `src/model/gemini/gemini.go` - Google Gemini API
 
 ### 2. Workflow Layer (`src/worklows/`)
@@ -46,11 +46,12 @@ type Node struct {
 }
 ```
 
-**Tool** - Executable functions:
+**Tool** - Executable functions (the canonical tool type across the codebase):
 ```go
 type Tool interface {
     Name() string
     Description() string
+    Parameters() map[string]any  // JSON-schema of the tool's arguments
     Call(ctx context.Context, args string) (string, error)
 }
 ```
@@ -96,6 +97,55 @@ type Graph struct {
 - Loop support with max iterations
 - Streaming execution
 
+### 3. Memory Layer (`src/memory/`)
+
+Provider-agnostic conversation store seeded into agent runs and persisted back
+across separate runs:
+
+```go
+type Memory interface {
+    Add(msg model.Message)
+    Messages() []model.Message
+    Clear()
+}
+```
+
+- `BufferMemory` - retains every message (unbounded)
+- `WindowMemory` - keeps the last N non-system messages, always preserving system messages
+
+### 4. Agent Layer (`src/agents/`)
+
+`Agent` is a generic, provider-agnostic runtime that drives a multi-turn
+tool-calling loop against any `model.Model` until the model stops requesting
+tools, a stop condition fires, or the turn budget is exhausted.
+
+```go
+type AgentConfig struct {
+    SystemPrompt string
+    Tools        []workflows.Tool
+    MaxTurns     int          // default 5
+    Temperature  float64      // default 0.7
+    Stop         StopFunc     // end early: func(turn int, lastContent string) bool
+    Memory       memory.Memory
+    Approver     ToolApprover // human-in-the-loop gate
+    Hooks        []Hook       // lifecycle observability
+}
+
+func NewAgent(m model.Model, cfg AgentConfig) *Agent
+```
+
+**Capabilities:**
+- **Human-in-the-loop** — `ToolApprover` returns an `ApprovalDecision{Approved, Reason, Args}`
+  before each tool call: approve, deny (reason fed back to the model), or rewrite arguments.
+- **Sub-agents** — `NewAgentTool(name, desc, *Agent)` adapts an `Agent` as a `workflows.Tool`,
+  letting a parent agent delegate to sub-agents.
+- **Observability** — `Hook func(ctx, Event)` receives `turn_start`, `model_response`,
+  `tool_start`, `tool_end`, and `finish` events.
+
+The coding agents (`NewCodingAgentWithTools`, `ReActCodingAgent`) and the concrete
+filesystem/shell tools (`FileTool`, `ShellTool`, `GrepTool`, `GlobTool`, `WorkspaceTool`)
+are thin presets over this runtime.
+
 ## Key Features
 
 - Idiomatic Go channel patterns (single channel with result struct)
@@ -109,15 +159,21 @@ type Graph struct {
 
 ```
 herald/
+├── cmd/herald/          # Bubble Tea TUI coding agent
+├── internal/
+│   ├── config/          # Provider config + API keys
+│   └── session/         # Persistent sessions (~/.herald)
 ├── src/
 │   ├── model/           # Model interfaces & implementations
-│   │   ├── model.go    # Core interfaces
-│   │   ├── openai/     # OpenAI/Groq provider
-│   │   ├── anthropic/ # Anthropic provider
-│   │   └── gemini/     # Google Gemini provider
-│   └── worklows/       # Workflow implementations
-│       ├── workflows.go  # Simple workflows
-│       └── graph.go      # Graph-based workflows
+│   │   ├── model.go     # Core interfaces
+│   │   ├── openai/      # OpenAI/Groq provider
+│   │   ├── anthropic/   # Anthropic provider
+│   │   └── gemini/      # Google Gemini provider
+│   ├── memory/          # Conversation memory (buffer / window)
+│   ├── agents/          # Generic agent runtime + tools
+│   └── worklows/        # Workflow implementations
+│       ├── workflows.go # Simple workflows
+│       └── graph.go     # Graph-based workflows
 ├── go.mod
 ├── README.md
 └── LICENSE
@@ -174,8 +230,14 @@ wf.RunStream(ctx, "Hello!", handler)
 - [x] Tool calling support
 - [x] Graph-based workflows
 - [x] Streaming support
-- [ ] Memory/state management
-- [ ] Proper Anthropic client implementation
+- [x] Generic agent runtime (multi-turn tool loop, stop conditions)
+- [x] Memory/state management (buffer / window)
+- [x] Human-in-the-loop (approve / deny / edit tool calls)
+- [x] Sub-agents (agent-as-tool composition)
+- [x] Observability hooks
+- [x] Proper Anthropic client implementation
+- [ ] File-backed persistent memory
+- [ ] Retry/resilience wrapper on `model.Model`
 - [ ] Subgraphs
 - [ ] More examples
 
