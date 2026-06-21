@@ -64,6 +64,33 @@ import "github.com/dropdevrahul/herald/src/model/gemini"
     environment. It looks for one of `GROQ_API_KEY`, `OPENAI_API_KEY`, or
     `ANTHROPIC_API_KEY`. The active provider defaults to `groq`.
 
+## Structured Output
+
+`model.GenerateJSON` calls a model and unmarshals a JSON value from its response
+into a Go value. It tolerates Markdown code fences and prose around the JSON,
+extracting the outermost JSON object or array before unmarshalling.
+
+```go
+import "github.com/dropdevrahul/herald/src/model"
+
+type Person struct {
+    Name string `json:"name"`
+    Age  int    `json:"age"`
+}
+
+var p Person
+msgs := []model.Message{
+    {Role: model.RoleUser, Content: "Give me a person as JSON."},
+}
+if err := model.GenerateJSON(ctx, m, msgs, nil, &p); err != nil {
+    log.Fatal(err)
+}
+```
+
+!!! note "Heuristic extraction"
+    JSON is located with an outermost-bracket scan, which is robust to fences and
+    surrounding text but is not a full streaming parser.
+
 ## Adding a Provider
 
 To add a provider, implement the `model.Model` interface and convert to/from the

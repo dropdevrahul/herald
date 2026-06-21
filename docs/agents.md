@@ -55,6 +55,33 @@ type Tool interface {
 }
 ```
 
+### Functional Tools
+
+You don't need to declare a struct and implement four methods for every tool.
+`agents.NewFuncTool` adapts a plain function into a `Tool`:
+
+```go
+tool := agents.NewFuncTool(
+    "get_weather",
+    "Get the current weather for a city",
+    map[string]any{
+        "type": "object",
+        "properties": map[string]any{
+            "city": map[string]any{"type": "string"},
+        },
+        "required": []string{"city"},
+    },
+    func(ctx context.Context, args string) (string, error) {
+        // parse args (JSON) and return a result
+        return `{"temp": 21, "sky": "clear"}`, nil
+    },
+)
+
+agent := agents.NewAgent(m, agents.AgentConfig{Tools: []workflows.Tool{tool}})
+```
+
+If `parameters` is `nil`, a minimal `{"type": "object"}` schema is used.
+
 ## Memory
 
 Memory lets an agent retain context across separate `Run` calls. Prior messages are
@@ -75,6 +102,15 @@ agent.Run(ctx, "What is my name?") // remembers the first turn
 
 - `memory.NewBufferMemory()` — retains every message (unbounded).
 - `memory.NewWindowMemory(n)` — keeps the last `n` non-system messages, always preserving system messages.
+- `memory.NewFileMemory(path)` — disk-backed memory that persists messages as JSON and reloads them on construction, so conversations survive process restarts.
+
+```go
+mem, err := memory.NewFileMemory("/path/to/chat.json") // loads existing history if present
+if err != nil {
+    log.Fatal(err)
+}
+agent := agents.NewAgent(m, agents.AgentConfig{Memory: mem})
+```
 
 ## Human-in-the-Loop
 
