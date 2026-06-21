@@ -18,11 +18,13 @@ type GeminiModel struct {
 }
 
 type GeminiRequest struct {
-	Contents []Content `json:"contents"`
+	Contents          []Content `json:"contents"`
+	SystemInstruction *Content  `json:"system_instruction,omitempty"`
 }
 
 type Content struct {
 	Parts []Part `json:"parts"`
+	Role  string `json:"role,omitempty"`
 }
 
 type Part struct {
@@ -58,10 +60,13 @@ func (m *GeminiModel) Generate(ctx context.Context, messages []model.Message, op
 		opts = &m.options
 	}
 
+	contents, systemInstruction := toGeminiContents(messages)
+
 	url := fmt.Sprintf("%s/models/%s:generateContent?key=%s", m.baseURL, opts.Model, m.apiKey)
 
 	body, err := json.Marshal(GeminiRequest{
-		Contents: toGeminiContents(messages),
+		Contents:          contents,
+		SystemInstruction: systemInstruction,
 	})
 	if err != nil {
 		return nil, err
@@ -129,22 +134,35 @@ func (m *GeminiModel) Stream(ctx context.Context, messages []model.Message, opts
 	return resultChan
 }
 
-func toGeminiContents(messages []model.Message) []Content {
+func toGeminiContents(messages []model.Message) ([]Content, *Content) {
 	var contents []Content
-	var currentContent Content
+	var systemParts []Part
 
 	for _, msg := range messages {
-		part := Part{Text: msg.Content}
-		currentContent.Parts = append(currentContent.Parts, part)
+		switch msg.Role {
+		case model.RoleSystem:
+			systemParts = append(systemParts, Part{Text: msg.Content})
+		case model.RoleUser, model.RoleTool:
+			contents = append(contents, Content{
+				Role:  "user",
+				Parts: []Part{{Text: msg.Content}},
+			})
+		case model.RoleAssistant:
+			contents = append(contents, Content{
+				Role:  "model",
+				Parts: []Part{{Text: msg.Content}},
+			})
+		}
 	}
 
-	if len(currentContent.Parts) > 0 {
-		contents = append(contents, currentContent)
+	var systemInstruction *Content
+	if len(systemParts) > 0 {
+		systemInstruction = &Content{Parts: systemParts}
 	}
 
 	if len(contents) == 0 {
 		contents = append(contents, Content{Parts: []Part{}})
 	}
 
-	return contents
+	return contents, systemInstruction
 }

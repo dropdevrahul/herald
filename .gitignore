@@ -1,1 +1,5 @@
 .env
+herald
+/herald
+.nexum-data/
+/site/

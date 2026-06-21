@@ -23,8 +23,10 @@ func (n Node) String() string {
 type Tool interface {
 	Name() string
 	Description() string
+	Parameters() map[string]any
 	Call(ctx context.Context, args string) (string, error)
 }
+
 
 type WorkflowI interface {
 	Run(ctx context.Context, input string) (string, error)
@@ -111,8 +113,9 @@ func (cw *ChainingWorkflow) RunNodeStream(ctx context.Context, node Node, input 
 	if len(toolCalls) > 0 {
 		toolResults := cw.executeTools(ctx, toolCalls)
 		messages = append(messages, model.Message{
-			Role:    model.RoleAssistant,
-			Content: sb.String(),
+			Role:      model.RoleAssistant,
+			Content:   sb.String(),
+			ToolCalls: toolCalls,
 		})
 		messages = append(messages, toolResults...)
 
@@ -157,8 +160,9 @@ func (cw *ChainingWorkflow) RunNode(ctx context.Context, node *Node, input strin
 	if len(resp.ToolCalls) > 0 {
 		toolResults := cw.executeTools(ctx, resp.ToolCalls)
 		messages = append(messages, model.Message{
-			Role:    model.RoleAssistant,
-			Content: resp.Content,
+			Role:      model.RoleAssistant,
+			Content:   resp.Content,
+			ToolCalls: resp.ToolCalls,
 		})
 		messages = append(messages, toolResults...)
 
@@ -365,7 +369,7 @@ func toolsToModelTools(tools []Tool) model.Tools {
 		result = append(result, model.FunctionDefinition{
 			Name:        t.Name(),
 			Description: t.Description(),
-			Parameters:  nil,
+			Parameters:  t.Parameters(),
 		})
 	}
 	return result
@@ -415,9 +419,3 @@ func (e *errorWorkflow) RunStream(ctx context.Context, input string, handler Str
 	return e.err
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

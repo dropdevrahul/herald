@@ -16,6 +16,10 @@ type Message struct {
 	Content    string
 	ToolCallID string
 	Name       string
+	// ToolCalls holds the tool calls an assistant message requested. The
+	// OpenAI API requires these to be present on the assistant turn that
+	// precedes the corresponding tool result messages.
+	ToolCalls []ToolCall
 }
 
 type ToolCall struct {
