@@ -31,6 +31,7 @@ type Model interface {
 
 **Helpers:**
 - `GenerateJSON(ctx, m, messages, opts, out any) error` — calls `m.Generate`, extracts the first JSON object or array from the response (tolerating Markdown fences and prose), and unmarshals into `out`. Returns an error when no JSON is found or unmarshalling fails.
+- `GenerateJSONStream(ctx, m, messages, opts, out any, onDelta func(string)) error` — streaming counterpart to `GenerateJSON`; streams the response to `onDelta` for live display, then extracts and unmarshals the full JSON once the stream completes (partial JSON cannot be decoded mid-stream).
 
 **Implementations:**
 - `src/model/openai/openai.go` - OpenAI-compatible (Groq, Azure, custom endpoints)

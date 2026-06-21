@@ -185,6 +185,16 @@ if err != nil {
 fmt.Println(out.Summary, out.Score)
 ```
 
+For a streaming variant, `model.GenerateJSONStream` streams the response to an
+`onDelta` callback for live display, then unmarshals the full JSON once complete
+(partial JSON can't be decoded mid-stream):
+
+```go
+err := model.GenerateJSONStream(ctx, m, messages, opts, &out, func(delta string) {
+    fmt.Print(delta)
+})
+```
+
 ### Human-in-the-Loop
 
 ```go

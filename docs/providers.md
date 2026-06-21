@@ -87,6 +87,23 @@ if err := model.GenerateJSON(ctx, m, msgs, nil, &p); err != nil {
 }
 ```
 
+### Streaming
+
+`model.GenerateJSONStream` is the streaming counterpart. It streams the response,
+calling `onDelta` with each chunk as it arrives (for live display), then extracts
+and unmarshals the JSON once the stream completes.
+
+```go
+var p Person
+err := model.GenerateJSONStream(ctx, m, msgs, nil, &p, func(delta string) {
+    fmt.Print(delta) // show progress as tokens arrive
+})
+```
+
+!!! note "Partial JSON can't be decoded"
+    A partial JSON value cannot be unmarshalled into a typed Go value mid-stream,
+    so unmarshalling happens once at the end. `onDelta` is for display only.
+
 !!! note "Heuristic extraction"
     JSON is located with an outermost-bracket scan, which is robust to fences and
     surrounding text but is not a full streaming parser.

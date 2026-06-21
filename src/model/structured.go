@@ -32,6 +32,43 @@ func GenerateJSON(ctx context.Context, m Model, messages []Message, opts *ModelO
 	return nil
 }
 
+// GenerateJSONStream is the streaming counterpart to GenerateJSON. It streams the
+// model's response, invoking onDelta (when non-nil) with each chunk of text as it
+// arrives — so callers can show live progress — then extracts the JSON value from
+// the full accumulated content and unmarshals it into out.
+//
+// Note: JSON is only unmarshalled once the stream completes; a partial JSON value
+// cannot be decoded into a typed Go value mid-stream. onDelta is for display only.
+func GenerateJSONStream(ctx context.Context, m Model, messages []Message, opts *ModelOptions, out any, onDelta func(delta string)) error {
+	var sb strings.Builder
+	for r := range m.Stream(ctx, messages, opts) {
+		if r.Err != nil {
+			return r.Err
+		}
+		// Mirror the agent loop: prefer Delta, fall back to a one-shot Content.
+		chunk := r.Delta
+		if chunk == "" && r.Content != "" {
+			chunk = r.Content
+		}
+		if chunk == "" {
+			continue
+		}
+		sb.WriteString(chunk)
+		if onDelta != nil {
+			onDelta(chunk)
+		}
+	}
+
+	raw, err := extractJSON(sb.String())
+	if err != nil {
+		return fmt.Errorf("GenerateJSONStream: %w", err)
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("GenerateJSONStream: unmarshal: %w", err)
+	}
+	return nil
+}
+
 // extractJSON strips optional Markdown fences and then returns the first
 // outermost JSON object or array found in s.
 func extractJSON(s string) ([]byte, error) {
