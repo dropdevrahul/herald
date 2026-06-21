@@ -78,6 +78,32 @@ wf := workflows.NewChainingWorkflow(m, nodes, &MyTool{})
 
 (Workflow tools also implement `Parameters() map[string]any`, returning a JSON-schema description of their arguments.)
 
+### Functional Tools
+
+Define a tool from a plain function — no struct required:
+
+```go
+import "github.com/dropdevrahul/herald/src/agents"
+
+tool := agents.NewFuncTool(
+    "echo",
+    "Echoes the input back to the caller",
+    map[string]any{"type": "object", "properties": map[string]any{
+        "text": map[string]any{"type": "string"},
+    }},
+    func(ctx context.Context, args string) (string, error) {
+        return args, nil
+    },
+)
+
+agent := agents.NewAgent(m, agents.AgentConfig{
+    SystemPrompt: "You are a helpful assistant.",
+    Tools:        []workflows.Tool{tool},
+})
+```
+
+Pass `nil` for the parameters map to get a minimal valid JSON-schema object automatically.
+
 ### Agents
 
 The `agents` package provides a generic, provider-agnostic agent runtime. It loops
@@ -120,6 +146,43 @@ agent := agents.NewAgent(m, agents.AgentConfig{
 
 agent.Run(ctx, "My name is Ada.")
 agent.Run(ctx, "What is my name?")  // remembers the first turn
+```
+
+Use `memory.NewFileMemory(path)` for disk-backed memory that survives process
+restarts — messages are persisted as JSON on every write and reloaded on
+construction:
+
+```go
+mem, err := memory.NewFileMemory("/var/lib/myapp/session.json")
+if err != nil {
+    log.Fatal(err)
+}
+agent := agents.NewAgent(m, agents.AgentConfig{
+    SystemPrompt: "You are a helpful assistant.",
+    Memory:       mem,
+})
+```
+
+### Structured Output
+
+`model.GenerateJSON` calls a model, extracts the first JSON object or array
+from the response (tolerating Markdown fences and surrounding prose), and
+unmarshals it into a Go value:
+
+```go
+import "github.com/dropdevrahul/herald/src/model"
+
+type Result struct {
+    Summary string `json:"summary"`
+    Score   int    `json:"score"`
+}
+
+var out Result
+err := model.GenerateJSON(ctx, m, messages, opts, &out)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(out.Summary, out.Score)
 ```
 
 ### Human-in-the-Loop
