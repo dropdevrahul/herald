@@ -32,6 +32,7 @@ type Model interface {
 **Helpers:**
 - `GenerateJSON(ctx, m, messages, opts, out any) error` — calls `m.Generate`, extracts the first JSON object or array from the response (tolerating Markdown fences and prose), and unmarshals into `out`. Returns an error when no JSON is found or unmarshalling fails.
 - `GenerateJSONStream(ctx, m, messages, opts, out any, onDelta func(string)) error` — streaming counterpart to `GenerateJSON`; streams the response to `onDelta` for live display, then extracts and unmarshals the full JSON once the stream completes (partial JSON cannot be decoded mid-stream).
+- `NewRetryModel(m Model, maxRetries int) *RetryModel` — wraps any `Model` to retry failed calls with exponential backoff (`100ms * 2^attempt`); `maxRetries` is the number of extra attempts after the first. `Generate` retries on any error; `Stream` only restarts before the first delta/content is emitted (once output is forwarded, errors propagate unchanged — no mid-stream resume).
 
 **Implementations:**
 - `src/model/openai/openai.go` - OpenAI-compatible (Groq, Azure, custom endpoints)
@@ -246,7 +247,7 @@ wf.RunStream(ctx, "Hello!", handler)
 - [x] Observability hooks
 - [x] Proper Anthropic client implementation
 - [x] File-backed persistent memory (`NewFileMemory`)
-- [ ] Retry/resilience wrapper on `model.Model`
+- [x] Retry/resilience wrapper on `model.Model` (`NewRetryModel`)
 - [ ] Subgraphs
 - [ ] More examples
 

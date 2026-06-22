@@ -195,6 +195,26 @@ err := model.GenerateJSONStream(ctx, m, messages, opts, &out, func(delta string)
 })
 ```
 
+### Resilience (Retry)
+
+`model.NewRetryModel` wraps any `model.Model` and retries failed calls with
+exponential backoff (`100ms * 2^attempt`). The second argument is the number of
+extra attempts after the first:
+
+```go
+import "github.com/dropdevrahul/herald/src/model"
+
+base := openai.NewOpenAIModel(model.ModelOptions{Model: "llama-3.3-70b-versatile"}, client)
+m := model.NewRetryModel(base, 3) // up to 4 attempts total
+
+resp, err := m.Generate(ctx, messages, opts)
+```
+
+`Generate` retries on any error. `Stream` only restarts before the first
+delta/content is emitted — once output has been forwarded the stream is
+partially consumed, so errors after that point propagate unchanged (no
+mid-stream resume).
+
 ### Human-in-the-Loop
 
 ```go
