@@ -78,6 +78,32 @@ wf := workflows.NewChainingWorkflow(m, nodes, &MyTool{})
 
 (Workflow tools also implement `Parameters() map[string]any`, returning a JSON-schema description of their arguments.)
 
+### Functional Tools
+
+Define a tool from a plain function — no struct required:
+
+```go
+import "github.com/dropdevrahul/herald/src/agents"
+
+tool := agents.NewFuncTool(
+    "echo",
+    "Echoes the input back to the caller",
+    map[string]any{"type": "object", "properties": map[string]any{
+        "text": map[string]any{"type": "string"},
+    }},
+    func(ctx context.Context, args string) (string, error) {
+        return args, nil
+    },
+)
+
+agent := agents.NewAgent(m, agents.AgentConfig{
+    SystemPrompt: "You are a helpful assistant.",
+    Tools:        []workflows.Tool{tool},
+})
+```
+
+Pass `nil` for the parameters map to get a minimal valid JSON-schema object automatically.
+
 ### Agents
 
 The `agents` package provides a generic, provider-agnostic agent runtime. It loops
@@ -121,6 +147,73 @@ agent := agents.NewAgent(m, agents.AgentConfig{
 agent.Run(ctx, "My name is Ada.")
 agent.Run(ctx, "What is my name?")  // remembers the first turn
 ```
+
+Use `memory.NewFileMemory(path)` for disk-backed memory that survives process
+restarts — messages are persisted as JSON on every write and reloaded on
+construction:
+
+```go
+mem, err := memory.NewFileMemory("/var/lib/myapp/session.json")
+if err != nil {
+    log.Fatal(err)
+}
+agent := agents.NewAgent(m, agents.AgentConfig{
+    SystemPrompt: "You are a helpful assistant.",
+    Memory:       mem,
+})
+```
+
+### Structured Output
+
+`model.GenerateJSON` calls a model, extracts the first JSON object or array
+from the response (tolerating Markdown fences and surrounding prose), and
+unmarshals it into a Go value:
+
+```go
+import "github.com/dropdevrahul/herald/src/model"
+
+type Result struct {
+    Summary string `json:"summary"`
+    Score   int    `json:"score"`
+}
+
+var out Result
+err := model.GenerateJSON(ctx, m, messages, opts, &out)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(out.Summary, out.Score)
+```
+
+For a streaming variant, `model.GenerateJSONStream` streams the response to an
+`onDelta` callback for live display, then unmarshals the full JSON once complete
+(partial JSON can't be decoded mid-stream):
+
+```go
+err := model.GenerateJSONStream(ctx, m, messages, opts, &out, func(delta string) {
+    fmt.Print(delta)
+})
+```
+
+### Resilience (Retry)
+
+`model.NewRetryModel` wraps any `model.Model` and retries failed calls with
+exponential backoff (`100ms * 2^attempt`). The second argument is the number of
+extra attempts after the first:
+
+```go
+import "github.com/dropdevrahul/herald/src/model"
+
+base := openai.NewOpenAIModel(model.ModelOptions{Model: "llama-3.3-70b-versatile"}, client)
+m := model.NewRetryModel(base, 3) // up to 4 attempts total
+
+resp, err := m.Generate(ctx, messages, opts)
+```
+
+`Generate` retries on any error. `Stream` only restarts before the first
+delta/content is emitted — once output has been forwarded the stream is
+partially consumed, so errors after that point propagate unchanged (no
+mid-stream resume).
 
 ### Human-in-the-Loop
 

@@ -29,6 +29,11 @@ type Model interface {
 - `StreamResult` - idiomatic single-channel streaming with `{Content, Delta, Usage, Err, ToolCalls}`
 - `ToolCall` - function call request from model
 
+**Helpers:**
+- `GenerateJSON(ctx, m, messages, opts, out any) error` — calls `m.Generate`, extracts the first JSON object or array from the response (tolerating Markdown fences and prose), and unmarshals into `out`. Returns an error when no JSON is found or unmarshalling fails.
+- `GenerateJSONStream(ctx, m, messages, opts, out any, onDelta func(string)) error` — streaming counterpart to `GenerateJSON`; streams the response to `onDelta` for live display, then extracts and unmarshals the full JSON once the stream completes (partial JSON cannot be decoded mid-stream).
+- `NewRetryModel(m Model, maxRetries int) *RetryModel` — wraps any `Model` to retry failed calls with exponential backoff (`100ms * 2^attempt`); `maxRetries` is the number of extra attempts after the first. `Generate` retries on any error; `Stream` only restarts before the first delta/content is emitted (once output is forwarded, errors propagate unchanged — no mid-stream resume).
+
 **Implementations:**
 - `src/model/openai/openai.go` - OpenAI-compatible (Groq, Azure, custom endpoints)
 - `src/model/anthropic/anthropic.go` - Anthropic API (net/http)
@@ -112,6 +117,7 @@ type Memory interface {
 
 - `BufferMemory` - retains every message (unbounded)
 - `WindowMemory` - keeps the last N non-system messages, always preserving system messages
+- `FileMemory` (`NewFileMemory(path string) (*FileMemory, error)`) - disk-backed memory that persists messages as a JSON array and reloads them on construction, enabling conversation state to survive restarts
 
 ### 4. Agent Layer (`src/agents/`)
 
@@ -145,6 +151,10 @@ func NewAgent(m model.Model, cfg AgentConfig) *Agent
 The coding agents (`NewCodingAgentWithTools`, `ReActCodingAgent`) and the concrete
 filesystem/shell tools (`FileTool`, `ShellTool`, `GrepTool`, `GlobTool`, `WorkspaceTool`)
 are thin presets over this runtime.
+
+**Functional tool adapter:**
+`NewFuncTool(name, description string, parameters map[string]any, fn func(ctx context.Context, args string) (string, error)) *FuncTool`
+adapts a plain function to `workflows.Tool` so tools can be defined without writing a four-method struct. Passing `nil` for parameters yields a minimal valid JSON-schema object.
 
 ## Key Features
 
@@ -236,8 +246,8 @@ wf.RunStream(ctx, "Hello!", handler)
 - [x] Sub-agents (agent-as-tool composition)
 - [x] Observability hooks
 - [x] Proper Anthropic client implementation
-- [ ] File-backed persistent memory
-- [ ] Retry/resilience wrapper on `model.Model`
+- [x] File-backed persistent memory (`NewFileMemory`)
+- [x] Retry/resilience wrapper on `model.Model` (`NewRetryModel`)
 - [ ] Subgraphs
 - [ ] More examples
 

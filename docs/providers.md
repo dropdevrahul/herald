@@ -64,6 +64,72 @@ import "github.com/dropdevrahul/herald/src/model/gemini"
     environment. It looks for one of `GROQ_API_KEY`, `OPENAI_API_KEY`, or
     `ANTHROPIC_API_KEY`. The active provider defaults to `groq`.
 
+## Resilience (Retry)
+
+`model.NewRetryModel` wraps any `model.Model` and retries failed calls with
+exponential backoff (`100ms * 2^attempt`). The second argument is the number of
+extra attempts after the first, so a value of `3` allows up to four attempts in
+total.
+
+```go
+import "github.com/dropdevrahul/herald/src/model"
+
+base := openai.NewOpenAIModel(model.ModelOptions{Model: "llama-3.3-70b-versatile"}, client)
+m := model.NewRetryModel(base, 3)
+
+resp, err := m.Generate(ctx, messages, opts)
+```
+
+!!! note "Stream retries only before the first delta"
+    `Generate` retries on any error. `Stream` only restarts before the first
+    delta/content is emitted — once output has been forwarded the stream is
+    partially consumed, so errors after that point propagate unchanged (no
+    mid-stream resume).
+
+## Structured Output
+
+`model.GenerateJSON` calls a model and unmarshals a JSON value from its response
+into a Go value. It tolerates Markdown code fences and prose around the JSON,
+extracting the outermost JSON object or array before unmarshalling.
+
+```go
+import "github.com/dropdevrahul/herald/src/model"
+
+type Person struct {
+    Name string `json:"name"`
+    Age  int    `json:"age"`
+}
+
+var p Person
+msgs := []model.Message{
+    {Role: model.RoleUser, Content: "Give me a person as JSON."},
+}
+if err := model.GenerateJSON(ctx, m, msgs, nil, &p); err != nil {
+    log.Fatal(err)
+}
+```
+
+### Streaming
+
+`model.GenerateJSONStream` is the streaming counterpart. It streams the response,
+calling `onDelta` with each chunk as it arrives (for live display), then extracts
+and unmarshals the JSON once the stream completes.
+
+```go
+var p Person
+err := model.GenerateJSONStream(ctx, m, msgs, nil, &p, func(delta string) {
+    fmt.Print(delta) // show progress as tokens arrive
+})
+```
+
+!!! note "Partial JSON can't be decoded"
+    A partial JSON value cannot be unmarshalled into a typed Go value mid-stream,
+    so unmarshalling happens once at the end. `onDelta` is for display only.
+
+!!! note "Heuristic extraction"
+    JSON is located with an outermost-bracket scan, which is robust to fences and
+    surrounding text but is not a full streaming parser.
+
 ## Adding a Provider
 
 To add a provider, implement the `model.Model` interface and convert to/from the
