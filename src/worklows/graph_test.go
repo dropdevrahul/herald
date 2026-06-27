@@ -2,6 +2,7 @@ package workflows
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -136,5 +137,101 @@ func TestGraphMaxIterations(t *testing.T) {
 
 	if callCount > 3 {
 		t.Errorf("node ran %d times, expected at most 3", callCount)
+	}
+}
+
+func TestGraphRunThreadCheckpoints(t *testing.T) {
+	g := NewGraph(nil).
+		AddNode("a", "node a", func(ctx context.Context, state any) (any, error) {
+			return "a-done", nil
+		}).
+		AddNode("b", "node b", func(ctx context.Context, state any) (any, error) {
+			return "b-done", nil
+		}).
+		AddEdge("a", "b").
+		SetStart("a")
+
+	cp := NewMemoryCheckpointer()
+	compiled, err := g.Compile()
+	if err != nil {
+		t.Fatalf("Compile() failed: %v", err)
+	}
+	compiled.WithCheckpointer(cp)
+
+	result, err := compiled.RunThread(context.Background(), "thread1", "start")
+	if err != nil {
+		t.Fatalf("RunThread() failed: %v", err)
+	}
+	if result != "b-done" {
+		t.Errorf("result: got %q, want %q", result, "b-done")
+	}
+
+	// After completion, checkpoint Node should be "" (run finished).
+	saved, ok, err := cp.Load(context.Background(), "thread1")
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !ok {
+		t.Fatal("Load() ok=false after completed run, want true")
+	}
+	if saved.Node != "" {
+		t.Errorf("checkpoint Node after completion: got %q, want %q", saved.Node, "")
+	}
+}
+
+func TestGraphRunThreadResumes(t *testing.T) {
+	var executed []string
+
+	g := NewGraph(nil).
+		AddNode("a", "node a", func(ctx context.Context, state any) (any, error) {
+			executed = append(executed, "a")
+			return "a-done", nil
+		}).
+		AddNode("b", "node b", func(ctx context.Context, state any) (any, error) {
+			executed = append(executed, "b")
+			return "b-done", nil
+		}).
+		AddEdge("a", "b").
+		SetStart("a")
+
+	cp := NewMemoryCheckpointer()
+	// Pre-seed a checkpoint that positions us at node "b", skipping "a".
+	if err := cp.Save(context.Background(), Checkpoint{
+		ThreadID:  "thread2",
+		Node:      "b",
+		Iteration: 1,
+		State:     json.RawMessage(`"seed"`),
+	}); err != nil {
+		t.Fatalf("pre-seed Save() error: %v", err)
+	}
+
+	compiled, err := g.Compile()
+	if err != nil {
+		t.Fatalf("Compile() failed: %v", err)
+	}
+	compiled.WithCheckpointer(cp)
+
+	result, err := compiled.RunThread(context.Background(), "thread2", "ignored")
+	if err != nil {
+		t.Fatalf("RunThread() failed: %v", err)
+	}
+	if result != "b-done" {
+		t.Errorf("result: got %q, want %q", result, "b-done")
+	}
+
+	// "a" must not have run; "b" must have.
+	for _, n := range executed {
+		if n == "a" {
+			t.Error("node 'a' was executed, expected it to be skipped on resume")
+		}
+	}
+	foundB := false
+	for _, n := range executed {
+		if n == "b" {
+			foundB = true
+		}
+	}
+	if !foundB {
+		t.Error("node 'b' was not executed, expected it to run on resume")
 	}
 }

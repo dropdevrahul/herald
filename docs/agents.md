@@ -36,6 +36,7 @@ answer, _ := agent.Run(ctx, "What is 15 + 27?")
 | `Memory`       | `memory.Memory`  | Seed/persist conversation across runs.                          |
 | `Approver`     | `ToolApprover`   | Human-in-the-loop gate consulted before each tool call.         |
 | `Hooks`        | `[]Hook`         | Lifecycle observability callbacks.                              |
+| `ToolTimeout`  | `time.Duration`  | Per-call deadline for tool execution. `0` means no timeout.     |
 
 The coding agents (`NewCodingAgentWithTools`, `ReActCodingAgent`) are thin presets
 over this runtime.
@@ -135,6 +136,52 @@ agent := agents.NewAgent(m, agents.AgentConfig{
 })
 ```
 
+## Durable Human-in-the-Loop
+
+For approvals that must survive a process restart, use `RunThread` and `Resume`
+backed by a `workflows.Checkpointer`. Set `AgentConfig.Checkpointer` and
+`AgentConfig.InterruptBefore`; when `InterruptBefore` returns `true` for a
+pending tool call, `RunThread` persists the full run state and returns an
+`AgentResult` whose `Interrupt` field is non-nil — no tool is executed yet.
+
+```go
+import (
+    "github.com/dropdevrahul/herald/src/agents"
+    "github.com/dropdevrahul/herald/src/worklows"
+)
+
+agent := agents.NewAgent(m, agents.AgentConfig{
+    Tools: []workflows.Tool{&DeleteFileTool{}},
+    Checkpointer: workflows.NewFileCheckpointer("./checkpoints"),
+    InterruptBefore: func(c model.ToolCall) bool {
+        return c.Function.Name == "delete_file"
+    },
+})
+
+res, _ := agent.RunThread(ctx, "thread-1", "Remove the temp directory.")
+if res.Interrupt != nil {
+    // res.Interrupt.ThreadID and res.Interrupt.ToolCall describe what is waiting.
+    // Obtain a human decision, then resume — works across process restarts.
+    res, _ = agent.Resume(ctx, "thread-1", agents.ApprovalDecision{Approved: true})
+}
+```
+
+### AgentConfig fields for durable HITL
+
+| Field             | Type                               | Description                                                                           |
+| ----------------- | ---------------------------------- | ------------------------------------------------------------------------------------- |
+| `Checkpointer`    | `workflows.Checkpointer`           | Persists durable thread state. Required when `InterruptBefore` is used. Use `workflows.NewFileCheckpointer(dir)` for cross-process durability or `workflows.NewMemoryCheckpointer()` for in-process (e.g. tests). |
+| `InterruptBefore` | `func(call model.ToolCall) bool`   | When non-nil and returns `true` for a tool call, the run pauses durably BEFORE executing that call. |
+
+### Interrupt and Resume
+
+- `AgentResult.Interrupt *Interrupt` — non-nil when the run paused. Contains `ThreadID string` and `ToolCall model.ToolCall` describing the pending call.
+- `agent.RunThread(ctx, threadID, input) (AgentResult, error)` — starts a durable run. If it pauses, state is persisted and `AgentResult.Interrupt` is set.
+- `agent.Resume(ctx, threadID, decision) (AgentResult, error)` — loads persisted state for `threadID` and continues, applying the `ApprovalDecision` to the pending tool call. `Approved: false` denies the call (reason fed back to the model); `Args != ""` rewrites the call arguments before executing.
+
+`Resume` loads state via the Checkpointer, so it can be called in a new process
+after the original `RunThread` call exits.
+
 ## Sub-Agents
 
 Wrap an agent as a tool so a parent agent can delegate to it. `NewAgentTool` adapts
@@ -173,3 +220,46 @@ Events are emitted with an `Event.Type` of one of:
 - `tool_start`
 - `tool_end`
 - `finish`
+
+## Tool Resilience
+
+Tool panics are always recovered: if a tool's `Call` method panics, the panic is
+caught and the model receives `Error: tool panicked: <value>` as the tool result
+instead of the agent run crashing.
+
+To bound a slow tool, set `AgentConfig.ToolTimeout`. When the deadline is exceeded
+the model receives `Error: context deadline exceeded` and the run continues:
+
+```go
+agent := agents.NewAgent(m, agents.AgentConfig{
+    Tools:       []workflows.Tool{&MyTool{}},
+    ToolTimeout: 30 * time.Second, // 0 (default) means no timeout
+})
+```
+
+## Token Usage
+
+Call `agent.RunResult` instead of `agent.Run` to receive an `AgentResult` that
+includes the final content plus token counts aggregated across every turn of the
+run:
+
+```go
+res, err := agent.RunResult(ctx, "Summarise this document.")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(res.Content)
+fmt.Printf("tokens used: prompt=%d completion=%d total=%d (turns=%d)\n",
+    res.Usage.PromptTokens, res.Usage.CompletionTokens, res.Usage.TotalTokens, res.Turns)
+```
+
+`AgentResult` fields:
+
+| Field     | Type          | Description                                                      |
+| --------- | ------------- | ---------------------------------------------------------------- |
+| `Content` | `string`      | Final model response text.                                       |
+| `Usage`   | `model.Usage` | Token counts (`PromptTokens`, `CompletionTokens`, `TotalTokens`) summed across all turns. |
+| `Turns`   | `int`         | Number of turns executed (including tool-call turns).            |
+
+`Run` and `RunStream` retain their existing signatures and behaviour; `RunResult`
+is the zero-overhead addition for callers that need cost accounting.

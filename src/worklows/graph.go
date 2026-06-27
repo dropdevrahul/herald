@@ -2,6 +2,7 @@ package workflows
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/dropdevrahul/herald/src/model"
 	"strings"
 )
@@ -133,6 +134,78 @@ type CompiledGraph struct {
 	*Graph
 	MaxIterations int
 	Tools         []Tool
+	checkpointer  Checkpointer
+}
+
+// WithCheckpointer attaches a Checkpointer to cg so that RunThread persists
+// state after each node and can resume an interrupted run.
+func (cg *CompiledGraph) WithCheckpointer(cp Checkpointer) *CompiledGraph {
+	cg.checkpointer = cp
+	return cg
+}
+
+// RunThread runs the graph for the given threadID, saving a checkpoint after
+// each node. If cg.checkpointer holds a prior checkpoint for threadID, execution
+// resumes from that node rather than starting over.
+func (cg *CompiledGraph) RunThread(ctx context.Context, threadID string, input any) (any, error) {
+	current := cg.Start
+	iteration := 0
+	maxIter := cg.MaxIterations
+	if maxIter == 0 {
+		maxIter = 10
+	}
+
+	// Resume from checkpoint if one exists.
+	if cg.checkpointer != nil {
+		cp, ok, err := cg.checkpointer.Load(ctx, threadID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			current = cp.Node
+			iteration = cp.Iteration
+			if len(cp.State) > 0 {
+				var restored any
+				if err := json.Unmarshal(cp.State, &restored); err != nil {
+					return nil, err
+				}
+				input = restored
+			}
+		}
+	}
+
+	for current != "" && iteration < maxIter {
+		node, ok := cg.Nodes[current]
+		if !ok {
+			break
+		}
+
+		result, err := node.Run(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+
+		input = result
+		iteration++
+		current = cg.getNextNode(ctx, current, result)
+
+		if cg.checkpointer != nil {
+			raw, err := json.Marshal(input)
+			if err != nil {
+				return nil, err
+			}
+			if err := cg.checkpointer.Save(ctx, Checkpoint{
+				ThreadID:  threadID,
+				Node:      current,
+				Iteration: iteration,
+				State:     raw,
+			}); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	return input, nil
 }
 
 func (cg *CompiledGraph) Run(ctx context.Context, input any) (any, error) {

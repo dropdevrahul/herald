@@ -64,6 +64,23 @@ compiled, _ := g.Compile()
 result, _ := compiled.Run(ctx, "input")
 ```
 
+### Checkpointing
+
+Attach a `Checkpointer` to a compiled graph so each node's output is saved
+durably. Re-running the same `threadID` resumes from the last completed node
+instead of restarting from scratch.
+
+```go
+cg, _ := graph.Compile()
+cg.WithCheckpointer(workflows.NewFileCheckpointer("./checkpoints"))
+out, _ := cg.RunThread(ctx, "thread-1", "input")
+```
+
+Use `workflows.NewMemoryCheckpointer()` for in-process persistence (e.g. tests),
+or `workflows.NewFileCheckpointer(dir)` for durability across process restarts.
+The `Checkpointer` interface can be implemented to back checkpoints with any
+store (database, object storage, etc.).
+
 ### With Tools
 
 ```go
@@ -130,6 +147,7 @@ answer, _ := agent.Run(ctx, "What is 15 + 27?")
 - **`Approver`** — a human-in-the-loop gate consulted before each tool call.
 - **`Stop`** — `func(turn int, lastContent string) bool` to end a run early.
 - **`Hooks`** — observe lifecycle events.
+- **`ToolTimeout`** — per-call deadline; `0` means no timeout.
 
 The coding agents (`NewCodingAgentWithTools`) are thin presets over this runtime.
 
@@ -232,6 +250,38 @@ agent := agents.NewAgent(m, agents.AgentConfig{
 Return `Approved: false` to deny (the reason is fed back to the model),
 `Approved: true, Args: "..."` to rewrite the arguments, or an error to abort the run.
 
+### Durable Human-in-the-Loop
+
+Use `RunThread` + `Resume` when you need human approval that can survive a
+process restart. Configure a `Checkpointer` and an `InterruptBefore` predicate
+on `AgentConfig`; when the predicate returns `true` for a tool call the run
+pauses and persists its full state before executing that call.
+
+```go
+import (
+    "github.com/dropdevrahul/herald/src/agents"
+    "github.com/dropdevrahul/herald/src/worklows"
+)
+
+agent := agents.NewAgent(m, agents.AgentConfig{
+    Tools: []workflows.Tool{&DeleteFileTool{}},
+    Checkpointer: workflows.NewFileCheckpointer("./checkpoints"),
+    InterruptBefore: func(c model.ToolCall) bool {
+        return c.Function.Name == "delete_file"
+    },
+})
+
+res, _ := agent.RunThread(ctx, "thread-1", "Remove the temp directory.")
+if res.Interrupt != nil {
+    // Run paused. Obtain a human decision, then resume — even in a new process.
+    agent.Resume(ctx, "thread-1", agents.ApprovalDecision{Approved: true})
+}
+```
+
+`Resume` reloads the persisted state for the given `threadID` via the
+Checkpointer, so it can be called in a completely separate process after the
+original run exits.
+
 ### Sub-Agents
 
 Wrap an agent as a tool so a parent agent can delegate to it:
@@ -245,6 +295,22 @@ coordinator := agents.NewAgent(m, agents.AgentConfig{
     Tools:        []workflows.Tool{tool},
 })
 ```
+
+### Tool Resilience
+
+Tool panics are always recovered and returned to the model as an `Error: tool panicked: ...`
+result, so a misbehaving tool cannot crash the agent run. To prevent a slow tool from
+blocking indefinitely, set `ToolTimeout`:
+
+```go
+agent := agents.NewAgent(m, agents.AgentConfig{
+    Tools:       []workflows.Tool{&MyTool{}},
+    ToolTimeout: 30 * time.Second, // 0 means no timeout
+})
+```
+
+When the deadline is exceeded the model receives `Error: context deadline exceeded` as the
+tool result and the run continues normally.
 
 ### Observability
 
@@ -261,6 +327,31 @@ agent := agents.NewAgent(m, agents.AgentConfig{
 
 Events are emitted with `Type` of `turn_start`, `model_response`, `tool_start`,
 `tool_end`, and `finish`.
+
+### Token Usage
+
+`agent.RunResult` returns an `AgentResult` carrying the final content, the
+number of turns executed, and aggregated token counts across all turns:
+
+```go
+import "github.com/dropdevrahul/herald/src/agents"
+
+res, err := agent.RunResult(ctx, "Summarise this document.")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(res.Content)
+fmt.Printf("tokens used: prompt=%d completion=%d total=%d (turns=%d)\n",
+    res.Usage.PromptTokens, res.Usage.CompletionTokens, res.Usage.TotalTokens, res.Turns)
+```
+
+`AgentResult` fields:
+
+| Field     | Type          | Description                                                      |
+| --------- | ------------- | ---------------------------------------------------------------- |
+| `Content` | `string`      | Final model response text.                                       |
+| `Usage`   | `model.Usage` | Token counts summed across every turn in the run.               |
+| `Turns`   | `int`         | Number of turns executed (including tool-call turns).            |
 
 ## Project Structure
 

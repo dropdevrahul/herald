@@ -101,6 +101,17 @@ type Graph struct {
 - Conditional routing with LLM
 - Loop support with max iterations
 - Streaming execution
+- Durable thread checkpointing and resume (see below)
+
+**Durable checkpointing:** A `CompiledGraph` can be given a `Checkpointer`
+(via `WithCheckpointer`) that saves a `Checkpoint{ThreadID, Node, Iteration,
+State}` after every node completes. Calling `RunThread(ctx, threadID, input)`
+instead of `Run` serialises the graph state to the checkpointer after each
+node; a subsequent call with the same `threadID` deserialises the stored state
+and resumes from the last completed node rather than restarting. Two
+implementations are provided: `NewMemoryCheckpointer()` for in-process use
+and `NewFileCheckpointer(dir)` for persistence across process restarts.
+The `Checkpointer` interface can be implemented against any backing store.
 
 ### 3. Memory Layer (`src/memory/`)
 
@@ -152,9 +163,19 @@ The coding agents (`NewCodingAgentWithTools`, `ReActCodingAgent`) and the concre
 filesystem/shell tools (`FileTool`, `ShellTool`, `GrepTool`, `GlobTool`, `WorkspaceTool`)
 are thin presets over this runtime.
 
+**Token usage accounting:** `Agent.RunResult(ctx, input) (AgentResult, error)`
+returns an `AgentResult{Content string, Usage model.Usage, Turns int}` in which
+`Usage` accumulates `PromptTokens`, `CompletionTokens`, and `TotalTokens` across
+every streaming turn so callers can track cost without instrumenting individual
+turns. `Run` and `RunStream` retain their existing signatures unchanged.
+
 **Functional tool adapter:**
 `NewFuncTool(name, description string, parameters map[string]any, fn func(ctx context.Context, args string) (string, error)) *FuncTool`
 adapts a plain function to `workflows.Tool` so tools can be defined without writing a four-method struct. Passing `nil` for parameters yields a minimal valid JSON-schema object.
+
+**Tool resilience:** The agent runtime always recovers from tool panics — if a tool's `Call` method panics the panic value is caught and the model receives `Error: tool panicked: <value>` as the tool result, keeping the run alive. An optional `AgentConfig.ToolTimeout time.Duration` field (zero means no timeout) applies a per-call `context.WithTimeout` around each tool invocation; when the deadline expires the model receives `Error: context deadline exceeded` and the loop continues to the next turn. Together these two mechanisms prevent a single misbehaving or slow tool from crashing or deadlocking an agent run.
+
+**Durable interrupt/resume (HITL):** `AgentConfig.Checkpointer workflows.Checkpointer` and `AgentConfig.InterruptBefore func(call model.ToolCall) bool` enable durable human-in-the-loop approval. When `InterruptBefore` returns `true` for a pending tool call, `Agent.RunThread(ctx, threadID, input) (AgentResult, error)` persists the full run state via the Checkpointer and returns an `AgentResult` with a non-nil `Interrupt *Interrupt` field (carrying `ThreadID` and the pending `ToolCall`) — the tool is not executed yet. `Agent.Resume(ctx, threadID, decision ApprovalDecision) (AgentResult, error)` reloads the persisted state for `threadID` and continues: `Approved: false` denies the call (reason fed back to the model), while `Args != ""` rewrites the call arguments before executing. Because all state is stored by the Checkpointer, `Resume` can run in a completely separate process after the original `RunThread` call exits, making the pattern suitable for asynchronous, out-of-band approval workflows.
 
 ## Key Features
 

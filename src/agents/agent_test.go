@@ -3,9 +3,11 @@ package agents
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/dropdevrahul/herald/src/memory"
 	"github.com/dropdevrahul/herald/src/model"
+	"github.com/dropdevrahul/herald/src/worklows"
 )
 
 // scriptedModel returns a pre-scripted StreamResult for each successive Stream
@@ -143,6 +145,25 @@ func TestAgentNilMemoryUnchanged(t *testing.T) {
 	}
 }
 
+func TestAgentRunResultUsage(t *testing.T) {
+	m := &scriptedModel{script: []model.StreamResult{
+		{Content: "done", Usage: model.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}},
+	}}
+	res, err := NewAgent(m, AgentConfig{}).RunResult(context.Background(), "q")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Content != "done" {
+		t.Errorf("Content: got %q, want %q", res.Content, "done")
+	}
+	if res.Usage.TotalTokens != 15 {
+		t.Errorf("TotalTokens: got %d, want 15", res.Usage.TotalTokens)
+	}
+	if res.Turns != 1 {
+		t.Errorf("Turns: got %d, want 1", res.Turns)
+	}
+}
+
 func TestAgentStopFunc(t *testing.T) {
 	tool := &recordingTool{}
 	m := &scriptedModel{script: []model.StreamResult{toolCallResult("echo")}}
@@ -169,5 +190,142 @@ func TestAgentStopFunc(t *testing.T) {
 	}
 	if tool.calls != 1 {
 		t.Fatalf("tool called %d times, want 1 before stop", tool.calls)
+	}
+}
+
+// panicTool is a tool whose Call always panics.
+type panicTool struct{}
+
+func (t *panicTool) Name() string                                          { return "panic_tool" }
+func (t *panicTool) Description() string                                   { return "always panics" }
+func (t *panicTool) Parameters() map[string]any                            { return map[string]any{"type": "object", "properties": map[string]any{}} }
+func (t *panicTool) Call(_ context.Context, _ string) (string, error)     { panic("boom") }
+
+// Verify panicTool satisfies the Tool interface at compile time.
+var _ Tool = (*panicTool)(nil)
+
+func TestAgentToolPanicRecovered(t *testing.T) {
+	tool := &panicTool{}
+	m := &scriptedModel{script: []model.StreamResult{
+		toolCallResult("panic_tool"),
+		{Content: "final"},
+	}}
+	out, err := NewAgent(m, AgentConfig{Tools: []Tool{tool}}).Run(context.Background(), "q")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != "final" {
+		t.Fatalf("got %q, want %q", out, "final")
+	}
+}
+
+// sleepTool is a tool whose Call sleeps for one second, ignoring ctx.
+type sleepTool struct{}
+
+func (t *sleepTool) Name() string                                      { return "sleep_tool" }
+func (t *sleepTool) Description() string                               { return "sleeps for a second" }
+func (t *sleepTool) Parameters() map[string]any                        { return map[string]any{"type": "object", "properties": map[string]any{}} }
+func (t *sleepTool) Call(_ context.Context, _ string) (string, error) {
+	time.Sleep(time.Second)
+	return "slept", nil
+}
+
+// Verify sleepTool satisfies the Tool interface at compile time.
+var _ Tool = (*sleepTool)(nil)
+
+func TestAgentToolTimeout(t *testing.T) {
+	tool := &sleepTool{}
+	m := &scriptedModel{script: []model.StreamResult{
+		toolCallResult("sleep_tool"),
+		{Content: "final"},
+	}}
+	cfg := AgentConfig{
+		Tools:       []Tool{tool},
+		ToolTimeout: 10 * time.Millisecond,
+	}
+	out, err := NewAgent(m, cfg).Run(context.Background(), "q")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != "final" {
+		t.Fatalf("got %q, want %q", out, "final")
+	}
+}
+
+// dangerTool counts how often it is called; used by the durable HITL tests.
+type dangerTool struct {
+	calls int
+}
+
+func (t *dangerTool) Name() string       { return "danger" }
+func (t *dangerTool) Description() string { return "a sensitive action" }
+func (t *dangerTool) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (t *dangerTool) Call(ctx context.Context, args string) (string, error) {
+	t.calls++
+	return "did-it", nil
+}
+
+func TestAgentInterruptAndResume(t *testing.T) {
+	tool := &dangerTool{}
+	m := &scriptedModel{script: []model.StreamResult{toolCallResult("danger"), {Content: "final"}}}
+	agent := NewAgent(m, AgentConfig{
+		Tools:           []Tool{tool},
+		Checkpointer:    workflows.NewMemoryCheckpointer(),
+		InterruptBefore: func(c model.ToolCall) bool { return c.Function.Name == "danger" },
+	})
+
+	res, err := agent.RunThread(context.Background(), "t1", "go")
+	if err != nil {
+		t.Fatalf("RunThread error: %v", err)
+	}
+	if res.Interrupt == nil {
+		t.Fatalf("expected an interrupt, got none")
+	}
+	if res.Interrupt.ToolCall.Function.Name != "danger" {
+		t.Fatalf("interrupted on %q, want danger", res.Interrupt.ToolCall.Function.Name)
+	}
+	if tool.calls != 0 {
+		t.Fatalf("tool ran before approval: %d calls", tool.calls)
+	}
+
+	res2, err := agent.Resume(context.Background(), "t1", ApprovalDecision{Approved: true})
+	if err != nil {
+		t.Fatalf("Resume error: %v", err)
+	}
+	if res2.Interrupt != nil {
+		t.Fatalf("unexpected second interrupt")
+	}
+	if res2.Content != "final" {
+		t.Fatalf("got %q, want %q", res2.Content, "final")
+	}
+	if tool.calls != 1 {
+		t.Fatalf("tool ran %d times, want 1", tool.calls)
+	}
+}
+
+func TestAgentResumeDeny(t *testing.T) {
+	tool := &dangerTool{}
+	m := &scriptedModel{script: []model.StreamResult{toolCallResult("danger"), {Content: "final"}}}
+	agent := NewAgent(m, AgentConfig{
+		Tools:           []Tool{tool},
+		Checkpointer:    workflows.NewMemoryCheckpointer(),
+		InterruptBefore: func(c model.ToolCall) bool { return c.Function.Name == "danger" },
+	})
+
+	if _, err := agent.RunThread(context.Background(), "t1", "go"); err != nil {
+		t.Fatalf("RunThread error: %v", err)
+	}
+
+	res, err := agent.Resume(context.Background(), "t1", ApprovalDecision{Approved: false, Reason: "nope"})
+	if err != nil {
+		t.Fatalf("Resume error: %v", err)
+	}
+	if res.Content != "final" {
+		t.Fatalf("got %q, want %q", res.Content, "final")
+	}
+	if tool.calls != 0 {
+		t.Fatalf("denied tool ran %d times, want 0", tool.calls)
 	}
 }
