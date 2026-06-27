@@ -104,6 +104,49 @@ result, _ := compiled.Run(ctx, "Hello!")
 - `SetStart(name)` — set the entry node.
 - `Compile()` — produce a runnable; set `MaxIterations` for loop support.
 
+## Checkpointing
+
+Attach a `Checkpointer` to a `CompiledGraph` to save state after each node and
+resume an interrupted run. Use `RunThread` instead of `Run` — it identifies the
+run by a string `threadID` and, on the next call with the same ID, resumes from
+the last completed node.
+
+```go
+import "github.com/dropdevrahul/herald/src/worklows"
+
+compiled, _ := g.Compile()
+compiled.WithCheckpointer(workflows.NewFileCheckpointer("./checkpoints"))
+
+// First call: runs all nodes and saves checkpoints.
+result, _ := compiled.RunThread(ctx, "thread-1", "input")
+
+// Second call with the same threadID: resumes from where the prior run stopped.
+result, _ = compiled.RunThread(ctx, "thread-1", "input")
+```
+
+**Types:**
+
+```go
+type Checkpoint struct {
+    ThreadID  string          // identifies the thread
+    Node      string          // next node to run on resume; "" means completed
+    Iteration int             // loop counter at time of save
+    State     json.RawMessage // JSON-encoded graph state
+}
+
+type Checkpointer interface {
+    Save(ctx context.Context, cp Checkpoint) error
+    Load(ctx context.Context, threadID string) (Checkpoint, bool, error)
+}
+```
+
+**Implementations:**
+
+- `NewMemoryCheckpointer()` — in-process, zero-configuration, not durable across restarts.
+- `NewFileCheckpointer(dir string)` — writes one JSON file per thread inside `dir`; durable across process restarts.
+
+Implement `Checkpointer` directly to back checkpoints with any store (database, object storage, etc.).
+
 ## Streaming
 
 Every workflow supports streaming via `RunStream`. The handler receives each

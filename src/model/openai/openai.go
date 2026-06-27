@@ -106,6 +106,11 @@ func (m *OpenAIModel) Generate(ctx context.Context, messages []model.Message, op
 func (m *OpenAIModel) Stream(ctx context.Context, messages []model.Message, opts *model.ModelOptions) <-chan model.StreamResult {
 	o := m.resolveOpts(opts)
 	params := m.buildParams(messages, o)
+	// Request usage on the final streaming chunk. This is set here rather
+	// than in buildParams so that Generate (non-streaming) is unaffected.
+	params.StreamOptions = openai.ChatCompletionStreamOptionsParam{
+		IncludeUsage: openai.Bool(true),
+	}
 
 	resultChan := make(chan model.StreamResult)
 
@@ -121,8 +126,18 @@ func (m *OpenAIModel) Stream(ctx context.Context, messages []model.Message, opts
 		toolAccum := map[int64]*model.ToolCall{}
 		var order []int64
 
+		// usage arrives on the final chunk (Choices is empty on that chunk).
+		var usage model.Usage
+
 		for stream.Next() {
 			chunk := stream.Current()
+			if chunk.Usage.TotalTokens > 0 {
+				usage = model.Usage{
+					PromptTokens:     int(chunk.Usage.PromptTokens),
+					CompletionTokens: int(chunk.Usage.CompletionTokens),
+					TotalTokens:      int(chunk.Usage.TotalTokens),
+				}
+			}
 			for _, choice := range chunk.Choices {
 				delta := choice.Delta.Content
 				if delta != "" {
@@ -168,6 +183,7 @@ func (m *OpenAIModel) Stream(ctx context.Context, messages []model.Message, opts
 		resultChan <- model.StreamResult{
 			Content:   sb.String(),
 			ToolCalls: toolCalls,
+			Usage:     usage,
 		}
 	}()
 
